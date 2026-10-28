@@ -76,6 +76,8 @@ jobs:
           set -eu
           export BUILD_PATH=.
           export MPR_FILE_PATH='${{ steps.meta.outputs.mpr }}'
+          export TAG_NAME='${{ steps.meta.outputs.tag }}'
+          export MDA_FILE_PATH="\$PWD/mda-path.txt"
           /opt/mendix/compile.sh
           find . -name '*.mda' -exec chmod a+r {} +
           EOF
@@ -99,7 +101,7 @@ jobs:
           ROOTFS_BUILDER: ${{ vars.ROOTFS_BUILDER_IMAGE }}
         run: |
           set -eu
-          rm -f compile.sh
+          rm -f compile.sh mda-path.txt
           mda=$(find . -name '*.mda' | head -n 1)
           test -n "$mda"
           mkdir -p project scripts
