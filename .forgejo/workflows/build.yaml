@@ -97,6 +97,7 @@ jobs:
           TAG: ${{ steps.meta.outputs.tag }}
           HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+          DOCKER_CONFIG: /kaniko/.docker
           ROOTFS_APP: ${{ vars.ROOTFS_APP_IMAGE }}
           ROOTFS_BUILDER: ${{ vars.ROOTFS_BUILDER_IMAGE }}
         run: |
