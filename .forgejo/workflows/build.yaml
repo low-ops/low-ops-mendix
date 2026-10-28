@@ -1,0 +1,164 @@
+# Mendix build. Tekton pipeline: mx-app-build-custom.
+# The build job pushes harbor/<REGISTRY>/apps-<repo>/app:<branch>-<shortsha>.
+# Deploy uses that image. lint and unit-test can be deleted.
+# Org variables: REGISTRY, TOOLKIT_IMAGE, ROOTFS_APP_IMAGE, ROOTFS_BUILDER_IMAGE
+# Org secrets: HARBOR_USERNAME, HARBOR_PASSWORD, UNIT_TEST_PASSWORD
+# The lowops runner must mount the Docker socket. Compile runs mxbuild with docker run.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: lowops
+    container:
+      image: ${{ vars.TOOLKIT_IMAGE }}
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - name: Checkout
+        env:
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          host="${SERVER#https://}"
+          host="${host#http://}"
+          git init .
+          git remote add origin "https://oauth2:${TOKEN}@${host}/${REPO}.git"
+          git fetch --depth 1 origin "$SHA"
+          git checkout FETCH_HEAD
+
+      - name: Metadata
+        id: meta
+        run: |
+          set -eu
+          version=$(/opt/mendix/bin/mxpc-pipeline-tools-cli mx-app-ver .)
+          mpr=$(/opt/mendix/bin/mxpc-pipeline-tools-cli mx-app-mpr-path .)
+          short=$(printf '%s' "${{ github.sha }}" | cut -c1-7)
+          tag=$(printf '%s' "${{ github.ref_name }}-${short}" | sed 's/%20/_/g' | tr -cd '[:alnum:]_.-' | sed 's/^[.-]*//' | cut -c -128)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "mpr=${mpr}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Compile MDA
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          MPR: ${{ steps.meta.outputs.mpr }}
+        run: |
+          set -eu
+          docker pull "private-cloud.registry.mendix.com/mxbuild:${VERSION}"
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            -e BUILD_PATH=. \
+            -e MPR_FILE_PATH="$MPR" \
+            "private-cloud.registry.mendix.com/mxbuild:${VERSION}" \
+            /opt/mendix/compile.sh
+
+      - name: Build and push
+        id: image
+        env:
+          REGISTRY: ${{ vars.REGISTRY }}
+          APP: ${{ github.event.repository.name }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+          ROOTFS_APP: ${{ vars.ROOTFS_APP_IMAGE }}
+          ROOTFS_BUILDER: ${{ vars.ROOTFS_BUILDER_IMAGE }}
+        run: |
+          set -eu
+          mda=$(find . -name '*.mda' | head -n 1)
+          test -n "$mda"
+          mkdir -p project scripts
+          unzip "$mda" -d ./project
+          cp -r /app/buildpack/scripts/* ./scripts/
+          if [ -f Dockerfile ]; then
+            dockerfile="$PWD/Dockerfile"
+          else
+            dockerfile=/app/buildpack/Dockerfile
+          fi
+          mkdir -p /kaniko/.docker
+          auth=$(printf '%s:%s' "$HARBOR_USERNAME" "$HARBOR_PASSWORD" | base64 | tr -d '\n')
+          printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$REGISTRY" "$auth" > /kaniko/.docker/config.json
+          image="${REGISTRY}/apps-${APP}/app:${TAG}"
+          /kaniko/executor \
+            --context "$PWD" \
+            --dockerfile "$dockerfile" \
+            --destination "$image" \
+            --build-arg "ROOTFS_IMAGE=${ROOTFS_APP}" \
+            --build-arg "BUILDER_ROOTFS_IMAGE=${ROOTFS_BUILDER}" \
+            --ignore-path=/var/mail \
+            --ignore-path=/var/spool/mail \
+            --ignore-path=//product_uuid \
+            --cleanup
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+  lint:
+    runs-on: lowops
+    continue-on-error: true
+    container:
+      image: ${{ vars.TOOLKIT_IMAGE }}
+    steps:
+      - name: Checkout
+        env:
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          host="${SERVER#https://}"
+          host="${host#http://}"
+          git init .
+          git remote add origin "https://oauth2:${TOKEN}@${host}/${REPO}.git"
+          git fetch --depth 1 origin "$SHA"
+          git checkout FETCH_HEAD
+      - name: mxlint
+        run: |
+          set -eu
+          cp -r /app/rules .
+          mxlint export-model
+          mxlint lint --json-file=report.json
+
+  unit-test:
+    needs: build
+    runs-on: lowops
+    continue-on-error: true
+    container:
+      image: ${{ needs.build.outputs.image }}
+      credentials:
+        username: ${{ secrets.HARBOR_USERNAME }}
+        password: ${{ secrets.HARBOR_PASSWORD }}
+    steps:
+      - name: Unit test
+        env:
+          MXRUNTIME_DatabaseType: HSQLDB
+          MXRUNTIME_DatabaseName: testing
+          MXRUNTIME_DatabaseJdbcUrl: jdbc:hsqldb:mem:testing
+          NON_MENDIX_PUBLIC_CLOUD: "true"
+          MX_UnitTesting_Enabled: "true"
+          MX_UnitTesting_RemoteApiEnabled: "true"
+          MX_UnitTesting_RemoteApiPassword: ${{ secrets.UNIT_TEST_PASSWORD }}
+        run: |
+          set -eu
+          cd /opt/mendix/build
+          ./startup.py &
+          python ./mx-app-unit-test-caller.py \
+            --api-password "$MX_UnitTesting_RemoteApiPassword" \
+            --json-file /tmp/results.json
+
+  scan:
+    needs: build
+    runs-on: lowops
+    continue-on-error: true
+    container:
+      image: aquasec/trivy:0.63.0
+      credentials:
+        username: ${{ secrets.HARBOR_USERNAME }}
+        password: ${{ secrets.HARBOR_PASSWORD }}
+    steps:
+      - name: Trivy
+        run: trivy image --format json --output scan-result.json --timeout 15m "${{ needs.build.outputs.image }}"
