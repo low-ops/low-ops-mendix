@@ -38,6 +38,7 @@ jobs:
       - name: Write metadata command
         run: |
           set -eu
+          chmod -R a+rwX .
           cat > meta.sh <<'EOF'
           #!/bin/sh
           set -eu
@@ -69,13 +70,14 @@ jobs:
       - name: Write compile command
         run: |
           set -eu
+          chmod -R a+rwX .
           cat > compile.sh <<EOF
           #!/bin/sh
           set -eu
           export BUILD_PATH=.
           export MPR_FILE_PATH='${{ steps.meta.outputs.mpr }}'
           /opt/mendix/compile.sh
-          chmod -R a+rX .
+          find . -name '*.mda' -exec chmod a+r {} +
           EOF
           chmod +x compile.sh
 
