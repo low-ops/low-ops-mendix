@@ -114,7 +114,7 @@ jobs:
           fi
           mkdir -p /kaniko/.docker
           auth=$(printf '%s:%s' "$HARBOR_USERNAME" "$HARBOR_PASSWORD" | base64 | tr -d '\n')
-          printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$REGISTRY" "$auth" > /kaniko/.docker/config.json
+          printf '{"auths":{"https://%s":{"auth":"%s"},"%s":{"auth":"%s"}}}\n' "$REGISTRY" "$auth" "$REGISTRY" "$auth" > /kaniko/.docker/config.json
           image="${REGISTRY}/apps-${APP}/app:${TAG}"
           /kaniko/executor \
             --context "$PWD" \
