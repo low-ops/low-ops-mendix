@@ -39,8 +39,10 @@ jobs:
         id: meta
         run: |
           set -eu
-          version=$(/opt/mendix/bin/mxpc-pipeline-tools-cli mx-app-ver .)
-          mpr=$(/opt/mendix/bin/mxpc-pipeline-tools-cli mx-app-mpr-path .)
+          image="private-cloud.registry.mendix.com/mxpc-pipeline-tools-cli:0.0.6"
+          docker pull "$image"
+          version=$(docker run --rm -v "$PWD:/work" -w /work --entrypoint /opt/mendix/bin/mxpc-pipeline-tools-cli "$image" mx-app-ver .)
+          mpr=$(docker run --rm -v "$PWD:/work" -w /work --entrypoint /opt/mendix/bin/mxpc-pipeline-tools-cli "$image" mx-app-mpr-path .)
           short=$(printf '%s' "${{ github.sha }}" | cut -c1-7)
           tag=$(printf '%s' "${{ github.ref_name }}-${short}" | sed 's/%20/_/g' | tr -cd '[:alnum:]_.-' | sed 's/^[.-]*//' | cut -c -128)
           echo "version=${version}" >> "$GITHUB_OUTPUT"
