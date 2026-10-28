@@ -3,7 +3,7 @@
 # Deploy uses that image. lint and unit-test can be deleted.
 # Org variables: REGISTRY, TOOLKIT_IMAGE, ROOTFS_APP_IMAGE, ROOTFS_BUILDER_IMAGE
 # Org secrets: HARBOR_USERNAME, HARBOR_PASSWORD, UNIT_TEST_PASSWORD
-# The lowops runner must mount the Docker socket. Compile runs mxbuild with docker run.
+# The lowops runner mounts /srv/shared and the Docker socket. Compile runs mxbuild through that socket.
 on:
   push:
     branches: [main]
@@ -13,6 +13,8 @@ jobs:
     runs-on: lowops
     container:
       image: ${{ vars.TOOLKIT_IMAGE }}
+      volumes:
+        - /srv/shared:/srv/shared
     outputs:
       image: ${{ steps.image.outputs.image }}
     steps:
@@ -35,14 +37,24 @@ jobs:
           git fetch --depth 1 origin "$SHA"
           git checkout FETCH_HEAD
 
+      - name: Install Docker CLI
+        run: |
+          set -eu
+          curl -fsSL -o /tmp/docker.tgz https://download.docker.com/linux/static/stable/x86_64/docker-29.5.2.tgz
+          mkdir -p /tmp/docker-cli
+          tar -xzf /tmp/docker.tgz -C /tmp/docker-cli --strip-components 1 docker/docker
+
       - name: Metadata
         id: meta
         run: |
           set -eu
+          share="/srv/shared/${GITHUB_RUN_ID}"
+          rm -rf "$share"
+          mkdir -p "$share"
+          cp -a . "$share/"
           image="private-cloud.registry.mendix.com/mxpc-pipeline-tools-cli:0.0.6"
-          docker pull "$image"
-          version=$(docker run --rm -v "$PWD:/work" -w /work --entrypoint /opt/mendix/bin/mxpc-pipeline-tools-cli "$image" mx-app-ver .)
-          mpr=$(docker run --rm -v "$PWD:/work" -w /work --entrypoint /opt/mendix/bin/mxpc-pipeline-tools-cli "$image" mx-app-mpr-path .)
+          version=$(/tmp/docker-cli/docker run --rm -v "$share:/work" -w /work --user 0 --entrypoint /opt/mendix/bin/mxpc-pipeline-tools-cli "$image" mx-app-ver .)
+          mpr=$(/tmp/docker-cli/docker run --rm -v "$share:/work" -w /work --user 0 --entrypoint /opt/mendix/bin/mxpc-pipeline-tools-cli "$image" mx-app-mpr-path .)
           short=$(printf '%s' "${{ github.sha }}" | cut -c1-7)
           tag=$(printf '%s' "${{ github.ref_name }}-${short}" | sed 's/%20/_/g' | tr -cd '[:alnum:]_.-' | sed 's/^[.-]*//' | cut -c -128)
           echo "version=${version}" >> "$GITHUB_OUTPUT"
@@ -55,14 +67,18 @@ jobs:
           MPR: ${{ steps.meta.outputs.mpr }}
         run: |
           set -eu
-          docker pull "private-cloud.registry.mendix.com/mxbuild:${VERSION}"
-          docker run --rm \
-            -v "$PWD:/work" \
+          share="/srv/shared/${GITHUB_RUN_ID}"
+          /tmp/docker-cli/docker run --rm \
+            -v "$share:/work" \
             -w /work \
+            --user 0 \
             -e BUILD_PATH=. \
-            -e MPR_FILE_PATH="$MPR" \
+            -e "MPR_FILE_PATH=${MPR}" \
+            --entrypoint sh \
             "private-cloud.registry.mendix.com/mxbuild:${VERSION}" \
-            /opt/mendix/compile.sh
+            -c '/opt/mendix/compile.sh && chmod -R a+rX /work'
+          cp -a "$share/." .
+          rm -rf "$share"
 
       - name: Build and push
         id: image
