@@ -2,7 +2,7 @@
 # The build job pushes harbor/<REGISTRY>/apps-<repo>/app:<branch>-<shortsha>.
 # Deploy uses that image. lint and unit-test can be deleted.
 # Org variables: REGISTRY, TOOLKIT_IMAGE, ROOTFS_APP_IMAGE, ROOTFS_BUILDER_IMAGE
-# Org secrets: HARBOR_USERNAME, HARBOR_PASSWORD, UNIT_TEST_PASSWORD
+# Org secrets: HARBOR_USERNAME, HARBOR_PASSWORD, UNIT_TEST_PASSWORD.
 # The lowops runner must mount the Docker socket. Compile runs mxbuild with docker run.
 on:
   push:
