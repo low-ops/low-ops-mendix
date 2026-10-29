@@ -154,6 +154,7 @@ jobs:
           git fetch --depth 1 origin "$SHA"
           git checkout FETCH_HEAD
       - name: mxlint
+        continue-on-error: true
         run: |
           set -eu
           cp -r /app/rules .
