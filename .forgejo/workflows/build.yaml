@@ -27,6 +27,7 @@ jobs:
           APP: ${{ github.event.repository.name }}
           COMMIT: ${{ github.sha }}
           REQUESTER: user/${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
           RABBITMQ_HOST: ${{ vars.RABBITMQ_HOST }}
           RABBITMQ_USERNAME: ${{ secrets.RABBITMQ_USERNAME }}
           RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
@@ -39,6 +40,9 @@ jobs:
           from pathlib import Path
           correlation = subprocess.check_output(["cat", "/proc/sys/kernel/random/uuid"], text=True).strip()
           Path("/srv/shared", correlation).mkdir(parents=True, exist_ok=True)
+          run_id = os.environ.get("RUN_ID", "")
+          if run_id:
+              Path("/srv/shared", f"run-{run_id}").write_text(correlation)
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"correlation={correlation}\n")
           message = {
@@ -177,6 +181,13 @@ jobs:
           auth=$(printf '%s:%s' "$HARBOR_USERNAME" "$HARBOR_PASSWORD" | base64 | tr -d '\n')
           printf '{"auths":{"https://%s":{"auth":"%s"},"%s":{"auth":"%s"}}}\n' "$REGISTRY" "$auth" "$REGISTRY" "$auth" > /kaniko/.docker/config.json
           image="${REGISTRY}/apps-${APP}/app:${TAG}"
+          share="/srv/shared/${CORRELATION}"
+          mkdir -p "$share"
+          meta=$(find . -path '*/model/metadata.json' | head -n 1)
+          if [ -n "$meta" ]; then
+            cp "$meta" "$share/metadata.json"
+          fi
+          printf 'image=%s\ncommit=%s\n' "$image" "$SHA" > "$share/build-log.txt"
           /kaniko/executor \
             --context "$PWD" \
             --dockerfile "$dockerfile" \
@@ -188,13 +199,6 @@ jobs:
             --ignore-path=//product_uuid \
             --cleanup
           echo "image=${image}" >> "$GITHUB_OUTPUT"
-          share="/srv/shared/${CORRELATION}"
-          mkdir -p "$share"
-          meta=$(find . -path '*/model/metadata.json' | head -n 1)
-          if [ -n "$meta" ]; then
-            cp "$meta" "$share/metadata.json"
-          fi
-          printf 'image=%s\ncommit=%s\n' "$image" "$SHA" > "$share/build-log.txt"
 
   lint:
     needs: build
@@ -683,6 +687,7 @@ jobs:
           COMMIT: ${{ github.sha }}
           REQUESTER: user/${{ github.actor }}
           CORRELATION: ${{ needs.build.outputs.correlation }}
+          RUN_ID: ${{ github.run_id }}
           TAG: ${{ needs.build.outputs.tag }}
           BUILD_RESULT: ${{ needs.build.result }}
           RABBITMQ_HOST: ${{ vars.RABBITMQ_HOST }}
@@ -703,6 +708,10 @@ jobs:
           tag = os.environ["TAG"]
           app = os.environ["APP"]
           bucket = os.environ["CORE_BUCKET"]
+          if not correlation:
+              marker = Path("/srv/shared") / f"run-{os.environ.get('RUN_ID', '')}"
+              if marker.is_file():
+                  correlation = marker.read_text().strip()
           if not correlation:
               raise SystemExit("build did not register a correlation id")
           share = Path("/srv/shared") / correlation
