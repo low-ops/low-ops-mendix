@@ -173,6 +173,10 @@ jobs:
     steps:
       - name: Unit test
         env:
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
           MXRUNTIME_DatabaseType: HSQLDB
           MXRUNTIME_DatabaseName: testing
           MXRUNTIME_DatabaseJdbcUrl: jdbc:hsqldb:mem:testing
@@ -182,6 +186,16 @@ jobs:
           MX_UnitTesting_RemoteApiPassword: ${{ secrets.UNIT_TEST_PASSWORD }}
         run: |
           set -eu
+          python - <<'PY'
+          import os
+          import urllib.request
+          base = os.environ["SERVER"].rstrip("/")
+          url = f"{base}/api/v1/repos/{os.environ['REPO']}/raw/.forgejo/mx-app-unit-test-caller.py?ref={os.environ['SHA']}"
+          request = urllib.request.Request(url, headers={"Authorization": "token " + os.environ["TOKEN"]})
+          destination = "/opt/mendix/build/mx-app-unit-test-caller.py"
+          with urllib.request.urlopen(request) as response, open(destination, "wb") as output:
+              output.write(response.read())
+          PY
           cd /opt/mendix/build
           ./startup.py &
           python ./mx-app-unit-test-caller.py \
@@ -194,9 +208,9 @@ jobs:
     continue-on-error: true
     container:
       image: aquasec/trivy:0.63.0
-      credentials:
-        username: ${{ secrets.HARBOR_USERNAME }}
-        password: ${{ secrets.HARBOR_PASSWORD }}
     steps:
       - name: Trivy
-        run: trivy image --format json --output scan-result.json --timeout 15m "${{ needs.build.outputs.image }}"
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: trivy image --username "$HARBOR_USERNAME" --password "$HARBOR_PASSWORD" --format json --output scan-result.json --timeout 15m "${{ needs.build.outputs.image }}"
