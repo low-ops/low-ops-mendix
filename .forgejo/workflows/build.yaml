@@ -1,9 +1,10 @@
 # Mendix build. Tekton pipeline: mx-app-build-custom.
 # The build job pushes harbor/<REGISTRY>/apps-<repo>/app:<branch>-<shortsha>.
 # Deploy uses that image. lint and unit-test can be deleted.
-# Org variables: REGISTRY, TOOLKIT_IMAGE, ROOTFS_APP_IMAGE, ROOTFS_BUILDER_IMAGE
-# Org secrets: HARBOR_USERNAME, HARBOR_PASSWORD, UNIT_TEST_PASSWORD
+# Org variables: REGISTRY, TOOLKIT_IMAGE, ROOTFS_APP_IMAGE, ROOTFS_BUILDER_IMAGE, RABBITMQ_HOST, MINIO_URL, CORE_BUCKET
+# Org secrets: HARBOR_USERNAME, HARBOR_PASSWORD, UNIT_TEST_PASSWORD, RABBITMQ_USERNAME, RABBITMQ_PASSWORD, MINIO_ACCESS_KEY, MINIO_SECRET_KEY
 # The runner starts the Mendix images and mounts this job's checkout into them.
+# lint, unit-test, and scan can be deleted. Remove a deleted job from notify.needs as well.
 on:
   push:
     branches: [main]
@@ -13,9 +14,66 @@ jobs:
     runs-on: lowops
     container:
       image: ${{ vars.TOOLKIT_IMAGE }}
+      volumes:
+        - /srv/shared:/srv/shared
     outputs:
       image: ${{ steps.image.outputs.image }}
+      tag: ${{ steps.meta.outputs.tag }}
+      correlation: ${{ steps.open.outputs.correlation }}
     steps:
+      - name: Register build
+        id: open
+        env:
+          APP: ${{ github.event.repository.name }}
+          COMMIT: ${{ github.sha }}
+          REQUESTER: user/${{ github.actor }}
+          RABBITMQ_HOST: ${{ vars.RABBITMQ_HOST }}
+          RABBITMQ_USERNAME: ${{ secrets.RABBITMQ_USERNAME }}
+          RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
+        run: |
+          set -eu
+          python - << 'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+          correlation = subprocess.check_output(["cat", "/proc/sys/kernel/random/uuid"], text=True).strip()
+          Path("/srv/shared", correlation).mkdir(parents=True, exist_ok=True)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"correlation={correlation}\n")
+          message = {
+              "appName": os.environ["APP"],
+              "envName": "",
+              "correlationId": correlation,
+              "requester": os.environ["REQUESTER"],
+              "status": "Succeeded",
+              "details": {
+                  "buildLogs": "",
+                  "mxLintResults": "",
+                  "mxUnitTestingResults": "",
+                  "mxAppMdaMetadata": "",
+                  "mxAppVulnerabilities": "",
+                  "commitId": os.environ["COMMIT"],
+                  "backupId": "",
+                  "backupDbLocation": "",
+                  "backupStorageLocation": "",
+                  "backupComment": "",
+                  "actionsetName": "",
+                  "packageId": "",
+              },
+          }
+          subprocess.check_call([
+              "python", "/usr/local/bin/push-pipeline-events.py",
+              "--host", os.environ["RABBITMQ_HOST"],
+              "--port", "5672",
+              "--username", os.environ["RABBITMQ_USERNAME"],
+              "--password", os.environ["RABBITMQ_PASSWORD"],
+              "--exchange", "lowops-exchange",
+              "--vhost", "/lowops-vhost",
+              "--routing-key", "controller.app.build.submit",
+              "--message", json.dumps(message),
+          ])
+          PY
       - name: Checkout
         env:
           SERVER: ${{ github.server_url }}
@@ -100,6 +158,8 @@ jobs:
           DOCKER_CONFIG: /kaniko/.docker
           ROOTFS_APP: ${{ vars.ROOTFS_APP_IMAGE }}
           ROOTFS_BUILDER: ${{ vars.ROOTFS_BUILDER_IMAGE }}
+          CORRELATION: ${{ steps.open.outputs.correlation }}
+          SHA: ${{ github.sha }}
         run: |
           set -eu
           rm -f compile.sh mda-path.txt
@@ -128,12 +188,22 @@ jobs:
             --ignore-path=//product_uuid \
             --cleanup
           echo "image=${image}" >> "$GITHUB_OUTPUT"
+          share="/srv/shared/${CORRELATION}"
+          mkdir -p "$share"
+          meta=$(find . -path '*/model/metadata.json' | head -n 1)
+          if [ -n "$meta" ]; then
+            cp "$meta" "$share/metadata.json"
+          fi
+          printf 'image=%s\ncommit=%s\n' "$image" "$SHA" > "$share/build-log.txt"
 
   lint:
+    needs: build
     runs-on: lowops
     continue-on-error: true
     container:
       image: ${{ vars.TOOLKIT_IMAGE }}
+      volumes:
+        - /srv/shared:/srv/shared
     steps:
       - name: Checkout
         env:
@@ -155,11 +225,20 @@ jobs:
           git checkout FETCH_HEAD
       - name: mxlint
         continue-on-error: true
+        env:
+          CORRELATION: ${{ needs.build.outputs.correlation }}
         run: |
           set -eu
           cp -r /app/rules .
           mxlint export-model
+          set +e
           mxlint lint --json-file=report.json
+          status=$?
+          set -e
+          if [ -f report.json ]; then
+            cp report.json "/srv/shared/${CORRELATION}/report.json"
+          fi
+          exit "$status"
 
   unit-test:
     needs: build
@@ -170,6 +249,8 @@ jobs:
       credentials:
         username: ${{ secrets.HARBOR_USERNAME }}
         password: ${{ secrets.HARBOR_PASSWORD }}
+      volumes:
+        - /srv/shared:/srv/shared
     steps:
       - name: Unit test
         env:
@@ -180,6 +261,7 @@ jobs:
           MX_UnitTesting_Enabled: "true"
           MX_UnitTesting_RemoteApiEnabled: "true"
           MX_UnitTesting_RemoteApiPassword: ${{ secrets.UNIT_TEST_PASSWORD }}
+          CORRELATION: ${{ needs.build.outputs.correlation }}
         run: |
           set -eu
           cat > /opt/mendix/build/mx-app-unit-test-caller.py << 'ENDSCRIPT'
@@ -550,9 +632,16 @@ jobs:
           ENDSCRIPT
           cd /opt/mendix/build
           ./startup.py &
+          set +e
           python ./mx-app-unit-test-caller.py \
             --api-password "$MX_UnitTesting_RemoteApiPassword" \
             --json-file /tmp/results.json
+          status=$?
+          set -e
+          if [ -f /tmp/results.json ]; then
+            cp /tmp/results.json "/srv/shared/${CORRELATION}/results.json"
+          fi
+          exit "$status"
 
   scan:
     needs: build
@@ -560,9 +649,108 @@ jobs:
     continue-on-error: true
     container:
       image: aquasec/trivy:0.63.0
+      volumes:
+        - /srv/shared:/srv/shared
     steps:
       - name: Trivy
         env:
           HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
-        run: trivy image --username "$HARBOR_USERNAME" --password "$HARBOR_PASSWORD" --format json --output scan-result.json --timeout 15m "${{ needs.build.outputs.image }}"
+          CORRELATION: ${{ needs.build.outputs.correlation }}
+        run: |
+          set -eu
+          set +e
+          trivy image --username "$HARBOR_USERNAME" --password "$HARBOR_PASSWORD" --format json --output scan-result.json --timeout 15m "${{ needs.build.outputs.image }}"
+          status=$?
+          set -e
+          if [ -f scan-result.json ]; then
+            cp scan-result.json "/srv/shared/${CORRELATION}/scan-result.json"
+          fi
+          exit "$status"
+
+  notify:
+    needs: [build, lint, unit-test, scan]
+    if: always()
+    runs-on: lowops
+    container:
+      image: ${{ vars.TOOLKIT_IMAGE }}
+      volumes:
+        - /srv/shared:/srv/shared
+    steps:
+      - name: Publish build result
+        env:
+          APP: ${{ github.event.repository.name }}
+          COMMIT: ${{ github.sha }}
+          REQUESTER: user/${{ github.actor }}
+          CORRELATION: ${{ needs.build.outputs.correlation }}
+          TAG: ${{ needs.build.outputs.tag }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          RABBITMQ_HOST: ${{ vars.RABBITMQ_HOST }}
+          RABBITMQ_USERNAME: ${{ secrets.RABBITMQ_USERNAME }}
+          RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
+          MINIO_URL: ${{ vars.MINIO_URL }}
+          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+          CORE_BUCKET: ${{ vars.CORE_BUCKET }}
+        run: |
+          set -eu
+          python - << 'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+          correlation = os.environ["CORRELATION"]
+          tag = os.environ["TAG"]
+          app = os.environ["APP"]
+          bucket = os.environ["CORE_BUCKET"]
+          if not correlation:
+              raise SystemExit("build did not register a correlation id")
+          share = Path("/srv/shared") / correlation
+          status = "Succeeded" if os.environ["BUILD_RESULT"] == "success" else "Failed"
+          subprocess.check_call([
+              "mc", "alias", "set", "minio", os.environ["MINIO_URL"],
+              os.environ["MINIO_ACCESS_KEY"], os.environ["MINIO_SECRET_KEY"],
+          ])
+
+          def upload(name, key):
+              source = share / name
+              if not source.is_file():
+                  return ""
+              destination = f"{bucket}/{key}"
+              subprocess.check_call(["mc", "cp", str(source), f"minio/{destination}"])
+              return destination
+
+          details = {
+              "buildLogs": upload("build-log.txt", f"taskrun-logs/{app}/{correlation}.txt"),
+              "mxLintResults": upload("report.json", f"linting-results/{app}/{tag}.json") if tag else "",
+              "mxUnitTestingResults": upload("results.json", f"unit-testing-results/{app}/{tag}.json") if tag else "",
+              "mxAppMdaMetadata": upload("metadata.json", f"mda-metadata/{app}/{tag}.json") if tag else "",
+              "mxAppVulnerabilities": upload("scan-result.json", f"oci-scan-results/{app}/{tag}.json") if tag else "",
+              "commitId": os.environ["COMMIT"],
+              "backupId": "",
+              "backupDbLocation": "",
+              "backupStorageLocation": "",
+              "backupComment": "",
+              "actionsetName": "",
+              "packageId": tag,
+          }
+          message = {
+              "appName": app,
+              "envName": "",
+              "correlationId": correlation,
+              "requester": os.environ["REQUESTER"],
+              "status": status,
+              "details": details,
+          }
+          subprocess.check_call([
+              "python", "/usr/local/bin/push-pipeline-events.py",
+              "--host", os.environ["RABBITMQ_HOST"],
+              "--port", "5672",
+              "--username", os.environ["RABBITMQ_USERNAME"],
+              "--password", os.environ["RABBITMQ_PASSWORD"],
+              "--exchange", "lowops-exchange",
+              "--vhost", "/lowops-vhost",
+              "--routing-key", "controller.app.build.complete",
+              "--message", json.dumps(message),
+          ])
+          PY
