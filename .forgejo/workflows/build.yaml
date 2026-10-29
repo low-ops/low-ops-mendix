@@ -197,6 +197,7 @@ jobs:
             --ignore-path=/var/mail \
             --ignore-path=/var/spool/mail \
             --ignore-path=//product_uuid \
+            --ignore-path=/srv/shared \
             --cleanup
           echo "image=${image}" >> "$GITHUB_OUTPUT"
 
@@ -240,6 +241,7 @@ jobs:
           status=$?
           set -e
           if [ -f report.json ]; then
+            mkdir -p "/srv/shared/${CORRELATION}"
             cp report.json "/srv/shared/${CORRELATION}/report.json"
           fi
           exit "$status"
@@ -643,6 +645,7 @@ jobs:
           status=$?
           set -e
           if [ -f /tmp/results.json ]; then
+            mkdir -p "/srv/shared/${CORRELATION}"
             cp /tmp/results.json "/srv/shared/${CORRELATION}/results.json"
           fi
           exit "$status"
@@ -668,6 +671,7 @@ jobs:
           status=$?
           set -e
           if [ -f scan-result.json ]; then
+            mkdir -p "/srv/shared/${CORRELATION}"
             cp scan-result.json "/srv/shared/${CORRELATION}/scan-result.json"
           fi
           exit "$status"
