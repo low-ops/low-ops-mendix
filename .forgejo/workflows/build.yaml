@@ -39,7 +39,9 @@ jobs:
           import subprocess
           from pathlib import Path
           correlation = subprocess.check_output(["cat", "/proc/sys/kernel/random/uuid"], text=True).strip()
-          Path("/srv/shared", correlation).mkdir(parents=True, exist_ok=True)
+          share = Path("/srv/shared", correlation)
+          share.mkdir(parents=True, exist_ok=True)
+          share.chmod(0o777)
           run_id = os.environ.get("RUN_ID", "")
           if run_id:
               Path("/srv/shared", f"run-{run_id}").write_text(correlation)
@@ -183,6 +185,7 @@ jobs:
           image="${REGISTRY}/apps-${APP}/app:${TAG}"
           share="/srv/shared/${CORRELATION}"
           mkdir -p "$share"
+          chmod 777 "$share"
           meta=$(find . -path '*/model/metadata.json' | head -n 1)
           if [ -n "$meta" ]; then
             cp "$meta" "$share/metadata.json"
