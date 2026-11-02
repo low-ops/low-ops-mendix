@@ -629,6 +629,12 @@ jobs:
                               "time": 0,
                               "failure": failure,
                               "skipped": None,
+                              "passed": None
+                              if failure is not None
+                              else {
+                                  "message": test_result.get("error") or "",
+                                  "type": test_result.get("step") or "",
+                              },
                           }
                       )
 

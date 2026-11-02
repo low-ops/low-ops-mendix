@@ -182,33 +182,17 @@ public class RemoteApiServlet extends RequestHandler {
 			JSONArray passedTests = new JSONArray();
 			result.put("passed_tests", passedTests);
 
-			StringBuilder query = new StringBuilder();
-			query.append(String.format("//%s", UnitTest.entityName));
-			// Failed tests
-			query.append("[" + UnitTest.MemberNames.Result + "=\"" + UnitTestResult._2_Failed + "\"]");
-			// In test suites that are not running anymore
-			query.append("[" + UnitTest.MemberNames.UnitTest_TestSuite + "/" + TestSuite.entityName + "/"
-					+ TestSuite.MemberNames.Result + "=\"" + UnitTestResult._2_Failed + "\"]");
+			List<IMendixObject> allTests = Core.retrieveXPathQuery(context,
+					String.format("//%s", UnitTest.entityName));
 
-			List<IMendixObject> unitTests = Core.retrieveXPathQuery(context, query.toString());
-
-			for (IMendixObject mxObject : unitTests) {
-				failedTests.put(testJson(UnitTest.initialize(context, mxObject)));
-			}
-
-			StringBuilder passedQuery = new StringBuilder();
-			passedQuery.append(String.format("//%s", UnitTest.entityName));
-			passedQuery.append("[" + UnitTest.MemberNames.Result + "=\"" + UnitTestResult._3_Success + "\"]");
-
-			List<IMendixObject> passed = Core.retrieveXPathQuery(context, passedQuery.toString());
-
-			for (IMendixObject mxObject : passed) {
+			for (IMendixObject mxObject : allTests) {
 				UnitTest test = UnitTest.initialize(context, mxObject);
-				TestSuite suite = test.getUnitTest_TestSuite(context);
-				if (suite == null || suite.getResult() == null || suite.getResult() == UnitTestResult._1_Running) {
-					continue;
+				UnitTestResult testResult = test.getResult();
+				if (testResult == UnitTestResult._2_Failed) {
+					failedTests.put(testJson(test));
+				} else if (testResult == UnitTestResult._3_Success) {
+					passedTests.put(testJson(test));
 				}
-				passedTests.put(testJson(test));
 			}
 
 			return result;
