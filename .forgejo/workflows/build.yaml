@@ -590,16 +590,17 @@ jobs:
                   logger.info(f"Results being exported to {self.json_file}")
                   results = response.json()
                   failed_tests = results.get("failed_tests", [])
+                  passed_tests = results.get("passed_tests", [])
                   """
                   {
                       "name": "MyFirstModule.UT_Test1",
                       "step": "Starting microflow test 'MyFirstModule.UT_Test1'",
                       "error": ""
-                  },
+                  }
                   """
                   test_suites = []
 
-                  for test_result in failed_tests:
+                  def add_testcase(test_result, failure):
                       test_suite_name = test_result["name"].split(".")[0]
 
                       my_test_suite = None
@@ -618,19 +619,28 @@ jobs:
                           }
                           test_suites.append(my_test_suite)
 
-                      my_test_suite["failures"] += 1
                       my_test_suite["tests"] += 1
+                      if failure is not None:
+                          my_test_suite["failures"] += 1
 
                       my_test_suite["testcases"].append(
                           {
                               "name": test_result["name"],
                               "time": 0,
-                              "failure": {
-                                  "message": test_result["error"],
-                                  "type": test_result["step"],
-                              },
+                              "failure": failure,
                               "skipped": None,
                           }
+                      )
+
+                  for test_result in passed_tests:
+                      add_testcase(test_result, None)
+                  for test_result in failed_tests:
+                      add_testcase(
+                          test_result,
+                          {
+                              "message": test_result["error"],
+                              "type": test_result["step"],
+                          },
                       )
 
                   json.dump({"testsuites": test_suites}, open(self.json_file, "w"), indent=2)

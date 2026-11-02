@@ -179,6 +179,8 @@ public class RemoteApiServlet extends RequestHandler {
 
 			JSONArray failedTests = new JSONArray();
 			result.put("failed_tests", failedTests);
+			JSONArray passedTests = new JSONArray();
+			result.put("passed_tests", passedTests);
 
 			StringBuilder query = new StringBuilder();
 			query.append(String.format("//%s", UnitTest.entityName));
@@ -191,15 +193,33 @@ public class RemoteApiServlet extends RequestHandler {
 			List<IMendixObject> unitTests = Core.retrieveXPathQuery(context, query.toString());
 
 			for (IMendixObject mxObject : unitTests) {
+				failedTests.put(testJson(UnitTest.initialize(context, mxObject)));
+			}
+
+			StringBuilder passedQuery = new StringBuilder();
+			passedQuery.append(String.format("//%s", UnitTest.entityName));
+			passedQuery.append("[" + UnitTest.MemberNames.Result + "=\"" + UnitTestResult._3_Success + "\"]");
+
+			List<IMendixObject> passed = Core.retrieveXPathQuery(context, passedQuery.toString());
+
+			for (IMendixObject mxObject : passed) {
 				UnitTest test = UnitTest.initialize(context, mxObject);
-				JSONObject i = new JSONObject();
-				i.put("name", test.getName());
-				i.put("error", test.getResultMessage());
-				i.put("step", test.getLastStep());
-				failedTests.put(i);
+				TestSuite suite = test.getUnitTest_TestSuite(context);
+				if (suite == null || suite.getResult() == null || suite.getResult() == UnitTestResult._1_Running) {
+					continue;
+				}
+				passedTests.put(testJson(test));
 			}
 
 			return result;
+		}
+
+		private JSONObject testJson(UnitTest test) {
+			JSONObject i = new JSONObject();
+			i.put("name", test.getName());
+			i.put("error", test.getResultMessage());
+			i.put("step", test.getLastStep());
+			return i;
 		}
 	}
 }
