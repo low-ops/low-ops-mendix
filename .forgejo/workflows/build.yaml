@@ -232,7 +232,6 @@ jobs:
           git fetch --depth 1 origin "$SHA"
           git checkout FETCH_HEAD
       - name: mxlint
-        continue-on-error: true
         env:
           CORRELATION: ${{ needs.build.outputs.correlation }}
         run: |
@@ -241,13 +240,31 @@ jobs:
           mxlint export-model
           set +e
           mxlint lint --json-file=report.json
-          status=$?
+          mxlint_status=$?
           set -e
           if [ -f report.json ]; then
             mkdir -p "/srv/shared/${CORRELATION}"
             cp report.json "/srv/shared/${CORRELATION}/report.json"
           fi
-          exit "$status"
+          report_status=0
+          python - << 'PY' || report_status=$?
+          import json
+          import sys
+          from pathlib import Path
+          path = Path("report.json")
+          if not path.is_file():
+              sys.exit(0)
+          data = json.loads(path.read_text())
+          failures = sum(
+              int(suite.get("failures") or 0) for suite in data.get("testsuites") or []
+          )
+          if failures:
+              print(f"Lint report contains {failures} failure(s)", file=sys.stderr)
+              sys.exit(1)
+          PY
+          if [ "$mxlint_status" -ne 0 ] || [ "$report_status" -ne 0 ]; then
+            exit 1
+          fi
 
   unit-test:
     needs: build
@@ -349,6 +366,14 @@ jobs:
                       args.json_file,
                   )
               app_testing.run()
+              with open(args.json_file, encoding="utf-8") as handle:
+                  payload = json.load(handle)
+              failures = sum(
+                  int(suite.get("failures") or 0) for suite in payload.get("testsuites") or []
+              )
+              if failures:
+                  logger.error("Unit tests failed: %s failure(s)", failures)
+                  raise SystemExit(1)
 
 
           """
