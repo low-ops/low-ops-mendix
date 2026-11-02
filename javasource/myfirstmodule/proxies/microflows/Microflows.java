@@ -107,4 +107,34 @@ public final class Microflows
 	{
 		uT_Test5Builder().execute(context);
 	}
+	public static com.mendix.core.actionmanagement.MicroflowCallBuilder uT_Test6Builder()
+	{
+		com.mendix.core.actionmanagement.MicroflowCallBuilder builder = Core.microflowCall("MyFirstModule.UT_Test6");
+		return builder;
+	}
+
+	public static void uT_Test6(IContext context)
+	{
+		uT_Test6Builder().execute(context);
+	}
+	public static com.mendix.core.actionmanagement.MicroflowCallBuilder uT_Test7Builder()
+	{
+		com.mendix.core.actionmanagement.MicroflowCallBuilder builder = Core.microflowCall("MyFirstModule.UT_Test7");
+		return builder;
+	}
+
+	public static void uT_Test7(IContext context)
+	{
+		uT_Test7Builder().execute(context);
+	}
+	public static com.mendix.core.actionmanagement.MicroflowCallBuilder uT_Test8Builder()
+	{
+		com.mendix.core.actionmanagement.MicroflowCallBuilder builder = Core.microflowCall("MyFirstModule.UT_Test8");
+		return builder;
+	}
+
+	public static void uT_Test8(IContext context)
+	{
+		uT_Test8Builder().execute(context);
+	}
 }
