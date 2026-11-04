@@ -19,5 +19,9 @@ python ./mx-app-unit-test-caller.py \
 status=$?
 set -e
 
-bash "$root/stage_to_share.sh" /tmp/results.json results.json
+if [ -f /tmp/results.json ] && [ -n "${CORRELATION:-}" ]; then
+  mkdir -p "/srv/shared/${CORRELATION}"
+  cp /tmp/results.json "/srv/shared/${CORRELATION}/results.json"
+fi
+
 exit "$status"

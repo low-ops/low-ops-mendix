@@ -66,6 +66,8 @@ jobs:
           set -eu
           mkdir -p "/srv/shared/${CORRELATION}/ci"
           cp .forgejo/scripts/mx_app_unit_test_caller.py "/srv/shared/${CORRELATION}/ci/"
+          cp .forgejo/scripts/unit_test.sh "/srv/shared/${CORRELATION}/ci/"
+          chmod +x "/srv/shared/${CORRELATION}/ci/unit_test.sh"
 
       - name: Prepare Mendix metadata script
         run: bash .forgejo/scripts/prepare_meta.sh
@@ -150,7 +152,7 @@ jobs:
           MX_UnitTesting_RemoteApiEnabled: "true"
           MX_UnitTesting_RemoteApiPassword: ${{ secrets.UNIT_TEST_PASSWORD }}
           CORRELATION: ${{ needs.build.outputs.correlation }}
-        run: bash .forgejo/scripts/unit_test.sh
+        run: bash "/srv/shared/${CORRELATION}/ci/unit_test.sh"
 
   scan:
     needs: build

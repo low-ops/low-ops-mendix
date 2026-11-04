@@ -257,10 +257,18 @@ class AppTestingAdvanced(AppTestingBase):
                     my_testcase_skipped = {"message": "Test skipped"}
                 my_testcase = {
                     "name": my_testcase_name,
+                    "location": f"{test_suite_name}/microflows",
                     "time": my_testcase_time,
-                    "failure": my_testcase_failure,
+                    "failure": None,
                     "skipped": my_testcase_skipped,
                 }
+                if my_testcase_failure is not None:
+                    message = my_testcase_failure.get("message") or "failed"
+                    my_testcase["failure"] = {
+                        "message": message,
+                        "type": my_testcase_failure.get("type") or "AssertionError",
+                        "content": message,
+                    }
                 test_suite_tests += 1
                 test_suite_time += my_testcase_time
                 test_suite_testcases.append(my_testcase)
@@ -355,20 +363,23 @@ class AppTestingDefault(AppTestingBase):
             if failure is not None:
                 my_test_suite["failures"] += 1
 
-            my_test_suite["testcases"].append(
-                {
-                    "name": test_result["name"],
-                    "time": 0,
-                    "failure": failure,
-                    "skipped": None,
-                    "passed": None
-                    if failure is not None
-                    else {
-                        "message": test_result.get("error") or "",
-                        "type": test_result.get("step") or "",
-                    },
+            short_name = test_result["name"].split(".")[-1]
+            location = f"{test_suite_name}/microflows"
+            case = {
+                "name": short_name,
+                "location": location,
+                "time": 0,
+                "failure": None,
+                "skipped": None,
+            }
+            if failure is not None:
+                message = failure.get("message") or "failed"
+                case["failure"] = {
+                    "message": message,
+                    "type": failure.get("type") or "AssertionError",
+                    "content": message,
                 }
-            )
+            my_test_suite["testcases"].append(case)
 
         for test_result in passed_tests:
             add_testcase(test_result, None)
