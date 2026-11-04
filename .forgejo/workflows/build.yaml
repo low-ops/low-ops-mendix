@@ -1,13 +1,31 @@
 # Mendix build. Tekton pipeline: mx-app-build-custom.
-# The build job pushes harbor/<REGISTRY>/apps-<repo>/app:<branch>-<shortsha>.
-# Deploy uses that image. lint and unit-test can be deleted.
+# CI scripts live in .forgejo/scripts/
 # Org variables: REGISTRY, TOOLKIT_IMAGE, ROOTFS_APP_IMAGE, ROOTFS_BUILDER_IMAGE, RABBITMQ_HOST, MINIO_URL, CORE_BUCKET
 # Org secrets: HARBOR_USERNAME, HARBOR_PASSWORD, UNIT_TEST_PASSWORD, RABBITMQ_USERNAME, RABBITMQ_PASSWORD, MINIO_ACCESS_KEY, MINIO_SECRET_KEY
-# The runner starts the Mendix images and mounts this job's checkout into them.
-# lint, unit-test, and scan can be deleted. Remove a deleted job from notify.needs as well.
 on:
   push:
     branches: [main]
+
+x-repo-checkout: &repo-checkout |
+  set -eu
+  if [ -n "${APT_PACKAGES:-}" ]; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends ${APT_PACKAGES}
+  fi
+  if [ -n "${APK_PACKAGES:-}" ]; then
+    apk add --no-cache ${APK_PACKAGES}
+  fi
+  base="${SERVER%/}"
+  case "$base" in
+    https://*) origin="https://oauth2:${TOKEN}@${base#https://}" ;;
+    http://*) origin="http://oauth2:${TOKEN}@${base#http://}" ;;
+    *) origin="http://oauth2:${TOKEN}@${base}" ;;
+  esac
+  git init .
+  git remote add origin "${origin}/${REPO}.git"
+  git fetch --depth 1 origin "$SHA"
+  git checkout FETCH_HEAD
 
 jobs:
   build:
@@ -21,6 +39,14 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       correlation: ${{ steps.open.outputs.correlation }}
     steps:
+      - name: Checkout
+        env:
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: *repo-checkout
+
       - name: Register build
         id: open
         env:
@@ -31,86 +57,18 @@ jobs:
           RABBITMQ_HOST: ${{ vars.RABBITMQ_HOST }}
           RABBITMQ_USERNAME: ${{ secrets.RABBITMQ_USERNAME }}
           RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
-        run: |
-          set -eu
-          python - << 'PY'
-          import json
-          import os
-          import subprocess
-          from pathlib import Path
-          correlation = subprocess.check_output(["cat", "/proc/sys/kernel/random/uuid"], text=True).strip()
-          share = Path("/srv/shared", correlation)
-          share.mkdir(parents=True, exist_ok=True)
-          share.chmod(0o777)
-          run_id = os.environ.get("RUN_ID", "")
-          if run_id:
-              Path("/srv/shared", f"run-{run_id}").write_text(correlation)
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"correlation={correlation}\n")
-          message = {
-              "appName": os.environ["APP"],
-              "envName": "",
-              "correlationId": correlation,
-              "requester": os.environ["REQUESTER"],
-              "status": "Succeeded",
-              "details": {
-                  "buildLogs": "",
-                  "mxLintResults": "",
-                  "mxUnitTestingResults": "",
-                  "mxAppMdaMetadata": "",
-                  "mxAppVulnerabilities": "",
-                  "commitId": os.environ["COMMIT"],
-                  "backupId": "",
-                  "backupDbLocation": "",
-                  "backupStorageLocation": "",
-                  "backupComment": "",
-                  "actionsetName": "",
-                  "packageId": "",
-              },
-          }
-          subprocess.check_call([
-              "python", "/usr/local/bin/push-pipeline-events.py",
-              "--host", os.environ["RABBITMQ_HOST"],
-              "--port", "5672",
-              "--username", os.environ["RABBITMQ_USERNAME"],
-              "--password", os.environ["RABBITMQ_PASSWORD"],
-              "--exchange", "lowops-exchange",
-              "--vhost", "/lowops-vhost",
-              "--routing-key", "controller.app.build.submit",
-              "--message", json.dumps(message),
-          ])
-          PY
-      - name: Checkout
-        env:
-          SERVER: ${{ github.server_url }}
-          REPO: ${{ github.repository }}
-          TOKEN: ${{ github.token }}
-          SHA: ${{ github.sha }}
-        run: |
-          set -eu
-          base="${SERVER%/}"
-          case "$base" in
-            https://*) origin="https://oauth2:${TOKEN}@${base#https://}" ;;
-            http://*) origin="http://oauth2:${TOKEN}@${base#http://}" ;;
-            *) origin="http://oauth2:${TOKEN}@${base}" ;;
-          esac
-          git init .
-          git remote add origin "${origin}/${REPO}.git"
-          git fetch --depth 1 origin "$SHA"
-          git checkout FETCH_HEAD
+        run: python .forgejo/scripts/register_build.py
 
-      - name: Write metadata command
+      - name: Stage CI scripts for later jobs
+        env:
+          CORRELATION: ${{ steps.open.outputs.correlation }}
         run: |
           set -eu
-          chmod -R a+rwX .
-          cat > meta.sh <<'EOF'
-          #!/bin/sh
-          set -eu
-          /opt/mendix/bin/mxpc-pipeline-tools-cli mx-app-ver . > version.txt
-          /opt/mendix/bin/mxpc-pipeline-tools-cli mx-app-mpr-path . > mpr.txt
-          chmod a+r version.txt mpr.txt
-          EOF
-          chmod +x meta.sh
+          mkdir -p "/srv/shared/${CORRELATION}/ci"
+          cp .forgejo/scripts/mx_app_unit_test_caller.py "/srv/shared/${CORRELATION}/ci/"
+
+      - name: Prepare Mendix metadata script
+        run: bash .forgejo/scripts/prepare_meta.sh
 
       - name: Read Mendix metadata
         uses: docker://private-cloud.registry.mendix.com/mxpc-pipeline-tools-cli:0.0.6
@@ -120,32 +78,13 @@ jobs:
 
       - name: Metadata
         id: meta
-        run: |
-          set -eu
-          version=$(cat version.txt)
-          mpr=$(cat mpr.txt)
-          short=$(printf '%s' "${{ github.sha }}" | cut -c1-7)
-          tag=$(printf '%s' "${{ github.ref_name }}-${short}" | sed 's/%20/_/g' | tr -cd '[:alnum:]_.-' | sed 's/^[.-]*//' | cut -c -128)
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "mpr=${mpr}" >> "$GITHUB_OUTPUT"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          rm -f meta.sh version.txt mpr.txt
+        env:
+          SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: bash .forgejo/scripts/read_metadata_outputs.sh
 
-      - name: Write compile command
-        run: |
-          set -eu
-          chmod -R a+rwX .
-          cat > compile.sh <<EOF
-          #!/bin/sh
-          set -eu
-          export BUILD_PATH=.
-          export MPR_FILE_PATH='${{ steps.meta.outputs.mpr }}'
-          export TAG_NAME='${{ steps.meta.outputs.tag }}'
-          export MDA_FILE_PATH="\$PWD/mda-path.txt"
-          /opt/mendix/compile.sh
-          find . -name '*.mda' -exec chmod a+r {} +
-          EOF
-          chmod +x compile.sh
+      - name: Prepare compile script
+        run: bash .forgejo/scripts/write_compile_script.sh '${{ steps.meta.outputs.mpr }}' '${{ steps.meta.outputs.tag }}'
 
       - name: Compile MDA
         uses: docker://private-cloud.registry.mendix.com/mxbuild:${{ steps.meta.outputs.version }}
@@ -166,43 +105,7 @@ jobs:
           ROOTFS_BUILDER: ${{ vars.ROOTFS_BUILDER_IMAGE }}
           CORRELATION: ${{ steps.open.outputs.correlation }}
           SHA: ${{ github.sha }}
-        run: |
-          set -eu
-          rm -f compile.sh mda-path.txt
-          mda=$(find . -name '*.mda' | head -n 1)
-          test -n "$mda"
-          mkdir -p project scripts
-          unzip "$mda" -d ./project
-          cp -r /app/buildpack/scripts/* ./scripts/
-          if [ -f Dockerfile ]; then
-            dockerfile="$PWD/Dockerfile"
-          else
-            dockerfile=/app/buildpack/Dockerfile
-          fi
-          mkdir -p /kaniko/.docker
-          auth=$(printf '%s:%s' "$HARBOR_USERNAME" "$HARBOR_PASSWORD" | base64 | tr -d '\n')
-          printf '{"auths":{"https://%s":{"auth":"%s"},"%s":{"auth":"%s"}}}\n' "$REGISTRY" "$auth" "$REGISTRY" "$auth" > /kaniko/.docker/config.json
-          image="${REGISTRY}/apps-${APP}/app:${TAG}"
-          share="/srv/shared/${CORRELATION}"
-          mkdir -p "$share"
-          chmod 777 "$share"
-          meta=$(find . -path '*/model/metadata.json' | head -n 1)
-          if [ -n "$meta" ]; then
-            cp "$meta" "$share/metadata.json"
-          fi
-          printf 'image=%s\ncommit=%s\n' "$image" "$SHA" > "$share/build-log.txt"
-          /kaniko/executor \
-            --context "$PWD" \
-            --dockerfile "$dockerfile" \
-            --destination "$image" \
-            --build-arg "ROOTFS_IMAGE=${ROOTFS_APP}" \
-            --build-arg "BUILDER_ROOTFS_IMAGE=${ROOTFS_BUILDER}" \
-            --ignore-path=/var/mail \
-            --ignore-path=/var/spool/mail \
-            --ignore-path=//product_uuid \
-            --ignore-path=/srv/shared \
-            --cleanup
-          echo "image=${image}" >> "$GITHUB_OUTPUT"
+        run: bash .forgejo/scripts/build_push.sh
 
   lint:
     needs: build
@@ -219,52 +122,11 @@ jobs:
           REPO: ${{ github.repository }}
           TOKEN: ${{ github.token }}
           SHA: ${{ github.sha }}
-        run: |
-          set -eu
-          base="${SERVER%/}"
-          case "$base" in
-            https://*) origin="https://oauth2:${TOKEN}@${base#https://}" ;;
-            http://*) origin="http://oauth2:${TOKEN}@${base#http://}" ;;
-            *) origin="http://oauth2:${TOKEN}@${base}" ;;
-          esac
-          git init .
-          git remote add origin "${origin}/${REPO}.git"
-          git fetch --depth 1 origin "$SHA"
-          git checkout FETCH_HEAD
+        run: *repo-checkout
       - name: mxlint
         env:
           CORRELATION: ${{ needs.build.outputs.correlation }}
-        run: |
-          set -eu
-          cp -r /app/rules .
-          mxlint export-model
-          set +e
-          mxlint lint --json-file=report.json
-          mxlint_status=$?
-          set -e
-          if [ -f report.json ]; then
-            mkdir -p "/srv/shared/${CORRELATION}"
-            cp report.json "/srv/shared/${CORRELATION}/report.json"
-          fi
-          report_status=0
-          python - << 'PY' || report_status=$?
-          import json
-          import sys
-          from pathlib import Path
-          path = Path("report.json")
-          if not path.is_file():
-              sys.exit(0)
-          data = json.loads(path.read_text())
-          failures = sum(
-              int(suite.get("failures") or 0) for suite in data.get("testsuites") or []
-          )
-          if failures:
-              print(f"Lint report contains {failures} failure(s)", file=sys.stderr)
-              sys.exit(1)
-          PY
-          if [ "$mxlint_status" -ne 0 ] || [ "$report_status" -ne 0 ]; then
-            exit 1
-          fi
+        run: bash .forgejo/scripts/lint.sh
 
   unit-test:
     needs: build
@@ -288,411 +150,7 @@ jobs:
           MX_UnitTesting_RemoteApiEnabled: "true"
           MX_UnitTesting_RemoteApiPassword: ${{ secrets.UNIT_TEST_PASSWORD }}
           CORRELATION: ${{ needs.build.outputs.correlation }}
-        run: |
-          set -eu
-          cat > /opt/mendix/build/mx-app-unit-test-caller.py << 'ENDSCRIPT'
-          #!/usr/bin/env python3
-
-
-          import argparse
-          import requests
-          import json
-
-          import logging
-
-
-          logger = logging.getLogger(__name__)
-          logging.basicConfig(level=logging.INFO)
-          import time
-
-
-          def main():
-              parser = argparse.ArgumentParser(
-                  description="This script is used to call the unit test API of the mx-app"
-              )
-              parser.add_argument(
-                  "--app-ready-timeout",
-                  type=int,
-                  default=300,
-                  help="Timeout in seconds to wait for the app to be ready",
-              )
-              parser.add_argument(
-                  "--app-testing-timeout",
-                  type=int,
-                  default=300,
-                  help="Timeout in seconds to wait for the unit test to finish",
-              )
-              parser.add_argument(
-                  "--api-password", type=str, required=True, help="Password for the testing API"
-              )
-              parser.add_argument(
-                  "--app-url",
-                  type=str,
-                  required=False,
-                  default="http://localhost:8081",
-                  help="URL of the app",
-              )
-              parser.add_argument(
-                  "--json-file",
-                  type=str,
-                  required=False,
-                  default="results.json",
-                  help="Results file",
-              )
-              parser.add_argument(
-                  "--mode",
-                  type=str,
-                  required=False,
-                  default="default",
-                  help="Mode of the app; default or advanced",
-              )
-
-              args = parser.parse_args()
-
-              if args.mode == "default":
-                  app_testing = AppTestingDefault(
-                      args.app_ready_timeout,
-                      args.app_testing_timeout,
-                      args.api_password,
-                      args.app_url,
-                      args.json_file,
-                  )
-              else:
-                  app_testing = AppTestingAdvanced(
-                      args.app_ready_timeout,
-                      args.app_testing_timeout,
-                      args.api_password,
-                      args.app_url,
-                      args.json_file,
-                  )
-              app_testing.run()
-              with open(args.json_file, encoding="utf-8") as handle:
-                  payload = json.load(handle)
-              failures = sum(
-                  int(suite.get("failures") or 0) for suite in payload.get("testsuites") or []
-              )
-              if failures:
-                  logger.error("Unit tests failed: %s failure(s)", failures)
-                  raise SystemExit(1)
-
-
-          """
-          {
-              "testsuites": [
-                  {
-                      "name": "TestSuite1",
-                      "tests": 2,
-                      "failures": 1,
-                      "skipped": 0,
-                      "time": 0.2,
-                      "testcases": [
-                          {
-                              "name": "Test1",
-                              "time": 0.1,
-                              "failure": null,
-                              "skipped": null,
-                          },
-                          {
-                              "name": "Test2",
-                              "time": 0.1,
-                              "failure": {
-                                  "message": "Test failed",
-                                  "type": "AssertionError",
-                              },
-                              "skipped": {
-                                  "message": "Test skipped",
-                              },
-                          }
-                      ]
-                  }
-              
-              ],
-          }
-          """
-
-
-          class AppTestingBase:
-              def __init__(
-                  self, app_ready_timeout, app_testing_timeout, api_password, app_url, json_file
-              ):
-                  self.app_ready_timeout = app_ready_timeout
-                  self.app_testing_timeout = app_testing_timeout
-                  self.api_password = api_password
-                  self.app_url = app_url
-                  self.json_file = json_file
-
-              def run(self):
-                  self._wait_for_app()
-                  self._start_unit_test()
-                  self._wait_for_unit_test()
-                  self._export_report()
-
-              def _start_unit_test(self):
-                  raise NotImplementedError("This method must be implemented in the subclass")
-
-              def _wait_for_unit_test(self):
-                  raise NotImplementedError("This method must be implemented in the subclass")
-
-              def _wait_for_app(self):
-                  timeout_seconds = self.app_ready_timeout
-                  while timeout_seconds > 0:
-                      try:
-                          response = requests.get(self.app_url)
-                          if response.status_code == 200:
-                              logger.info("App is ready")
-                              break
-                      except requests.exceptions.RequestException:
-                          pass
-                      timeout_seconds -= 1
-                      if timeout_seconds == 0:
-                          logger.error("App did not start in time")
-                          exit(1)
-                      if timeout_seconds % 60 == 0:
-                          logger.info(f"Waiting for app to start. {timeout_seconds} seconds left")
-                      time.sleep(1)
-
-              def _export_report(self):
-                  raise NotImplementedError("This method must be implemented in the subclass")
-
-
-          class AppTestingAdvanced(AppTestingBase):
-              def __init__(
-                  self, app_ready_timeout, app_testing_timeout, api_password, app_url, json_file
-              ):
-                  super().__init__(
-                      app_ready_timeout, app_testing_timeout, api_password, app_url, json_file
-                  )
-                  self.base_url = f"{app_url}/rest/unittest/v1"
-                  self.headers = {
-                      "Content-Type": "application/json",
-                      "Authorization": api_password,
-                  }
-
-              def _start_unit_test(self):
-                  response = requests.post(
-                      f"{self.base_url}/execution/start", headers=self.headers
-                  )
-                  response.raise_for_status()
-                  logger.info("Unit test run started")
-
-              def _wait_for_unit_test(self):
-                  finished = False
-                  timeout_seconds = self.app_testing_timeout
-                  while not finished:
-                      response = requests.get(
-                          f"{self.base_url}/execution/status", headers=self.headers
-                      )
-                      if response.status_code != 200:
-                          logger.error("Failed to get unit test status")
-                      try:
-                          response_json = response.json()
-                          if response_json.get("Status", None) == "Finished":
-                              finished = True
-                      except Exception as e:
-                          logger.error("Failed to parse unit test status: " + str(e))
-                      if timeout_seconds == 0:
-                          logger.error("Unit test did not finish in time")
-                          exit(1)
-                      if timeout_seconds % 60 == 0:
-                          logger.info(
-                              f"Waiting for unit test to finish. {timeout_seconds} seconds left"
-                          )
-                      timeout_seconds -= 1
-                      time.sleep(1)
-
-              def _export_report(self):
-                  response = requests.get(
-                      f"{self.base_url}/applicationresult/latest", headers=self.headers
-                  )
-                  response.raise_for_status()
-                  logger.info(f"Results being exported to {self.json_file}")
-                  results = response.json()
-                  test_results = results.get("TestResults", [])
-                  test_suites = []
-                  for test_result in test_results:
-                      test_suite_name = test_result["Module"]
-                      test_suite_tests = 0
-                      test_suite_failures = 0
-                      test_suite_skipped = 0
-                      test_suite_time = 0
-                      test_suite_testcases = []
-
-                      for testcase in test_result.get("UTResults", []):
-                          description = testcase.get("Description", None)
-                          data_variation = testcase.get("DataVariationSequence", None)
-                          my_testcase_name = testcase["Name"]
-                          if description:
-                              my_testcase_name = f"{my_testcase_name} ({description})"
-                          elif data_variation:
-                              my_testcase_name = f"{my_testcase_name} ({data_variation})"
-                          try:
-                              my_testcase_time = (
-                                  float(testcase["ReadableTime"].replace(" milliseconds", ""))
-                                  * 0.001
-                              )
-                          except:
-                              logger.warning(
-                                  f"Could not parse time for {my_testcase_name}: {testcase['ReadableTime']}"
-                              )
-                              my_testcase_time = 0
-                          my_testcase_skipped = None
-                          my_testcase_failure = None
-                          if testcase["Result"] == "_2_Failed":
-                              test_suite_failures += 1
-                              my_testcase_failure = {
-                                  "message": testcase.get(
-                                      "ResultMessage", str(testcase.get("AssertResults"))
-                                  ),
-                                  "type": "AssertionError",
-                              }
-                          elif testcase["Result"] == "_1_Skipped":
-                              test_suite_skipped += 1
-                              my_testcase_skipped = {"message": "Test skipped"}
-                          my_testcase = {
-                              "name": my_testcase_name,
-                              "time": my_testcase_time,
-                              "failure": my_testcase_failure,
-                              "skipped": my_testcase_skipped,
-                          }
-                          test_suite_tests += 1
-                          test_suite_time += my_testcase_time
-                          test_suite_testcases.append(my_testcase)
-                      current_test_suite = {
-                          "name": test_suite_name,
-                          "tests": len(test_suite_testcases),
-                          "failures": test_suite_failures,
-                          "skipped": test_suite_skipped,
-                          "time": test_suite_time,
-                          "testcases": test_suite_testcases,
-                      }
-                      test_suites.append(current_test_suite)
-                  json.dump({"testsuites": test_suites}, open(self.json_file, "w"), indent=2)
-
-
-          class AppTestingDefault(AppTestingBase):
-              def __init__(
-                  self, app_ready_timeout, app_testing_timeout, api_password, app_url, json_file
-              ):
-                  super().__init__(
-                      app_ready_timeout, app_testing_timeout, api_password, app_url, json_file
-                  )
-                  self.base_url = f"{app_url}/unittests"
-                  self.auth = {
-                      "password": api_password,
-                  }
-
-              def _start_unit_test(self):
-                  response = requests.post(f"{self.base_url}/start", json=self.auth)
-                  response.raise_for_status()
-                  logger.info("Unit test run started")
-
-              def _wait_for_unit_test(self):
-                  finished = False
-                  timeout_seconds = self.app_testing_timeout
-                  while not finished:
-                      response = requests.post(f"{self.base_url}/status", json=self.auth)
-                      if response.status_code != 200:
-                          logger.error("Failed to get unit test status")
-                      try:
-                          response_json = response.json()
-                          if response_json.get("completed", False) == True:
-                              finished = True
-                      except Exception as e:
-                          logger.error("Failed to parse unit test status: " + str(e))
-                      if timeout_seconds == 0:
-                          logger.error("Unit test did not finish in time")
-                          exit(1)
-                      if timeout_seconds % 60 == 0:
-                          logger.info(
-                              f"Waiting for unit test to finish. {timeout_seconds} seconds left"
-                          )
-                      timeout_seconds -= 1
-                      time.sleep(1)
-
-              def _export_report(self):
-                  response = requests.post(f"{self.base_url}/status", json=self.auth)
-                  response.raise_for_status()
-                  logger.info(f"Results being exported to {self.json_file}")
-                  results = response.json()
-                  failed_tests = results.get("failed_tests", [])
-                  passed_tests = results.get("passed_tests", [])
-                  """
-                  {
-                      "name": "MyFirstModule.UT_Test1",
-                      "step": "Starting microflow test 'MyFirstModule.UT_Test1'",
-                      "error": ""
-                  }
-                  """
-                  test_suites = []
-
-                  def add_testcase(test_result, failure):
-                      test_suite_name = test_result["name"].split(".")[0]
-
-                      my_test_suite = None
-                      for test_suite in test_suites:
-                          if test_suite["name"] == test_suite_name:
-                              my_test_suite = test_suite
-                              break
-                      if not my_test_suite:
-                          my_test_suite = {
-                              "name": test_suite_name,
-                              "tests": 0,
-                              "failures": 0,
-                              "skipped": 0,
-                              "time": 0,
-                              "testcases": [],
-                          }
-                          test_suites.append(my_test_suite)
-
-                      my_test_suite["tests"] += 1
-                      if failure is not None:
-                          my_test_suite["failures"] += 1
-
-                      my_test_suite["testcases"].append(
-                          {
-                              "name": test_result["name"],
-                              "time": 0,
-                              "failure": failure,
-                              "skipped": None,
-                              "passed": None
-                              if failure is not None
-                              else {
-                                  "message": test_result.get("error") or "",
-                                  "type": test_result.get("step") or "",
-                              },
-                          }
-                      )
-
-                  for test_result in passed_tests:
-                      add_testcase(test_result, None)
-                  for test_result in failed_tests:
-                      add_testcase(
-                          test_result,
-                          {
-                              "message": test_result["error"],
-                              "type": test_result["step"],
-                          },
-                      )
-
-                  json.dump({"testsuites": test_suites}, open(self.json_file, "w"), indent=2)
-
-
-          if __name__ == "__main__":
-              main()
-          ENDSCRIPT
-          cd /opt/mendix/build
-          ./startup.py &
-          set +e
-          python ./mx-app-unit-test-caller.py \
-            --api-password "$MX_UnitTesting_RemoteApiPassword" \
-            --json-file /tmp/results.json
-          status=$?
-          set -e
-          if [ -f /tmp/results.json ]; then
-            mkdir -p "/srv/shared/${CORRELATION}"
-            cp /tmp/results.json "/srv/shared/${CORRELATION}/results.json"
-          fi
-          exit "$status"
+        run: bash .forgejo/scripts/unit_test.sh
 
   scan:
     needs: build
@@ -711,10 +169,11 @@ jobs:
         run: |
           set -eu
           set +e
-          trivy image --username "$HARBOR_USERNAME" --password "$HARBOR_PASSWORD" --format json --output scan-result.json --timeout 15m "${{ needs.build.outputs.image }}"
+          trivy image --username "$HARBOR_USERNAME" --password "$HARBOR_PASSWORD" \
+            --format json --output scan-result.json --timeout 15m "${{ needs.build.outputs.image }}"
           status=$?
           set -e
-          if [ -f scan-result.json ]; then
+          if [ -f scan-result.json ] && [ -n "${CORRELATION:-}" ]; then
             mkdir -p "/srv/shared/${CORRELATION}"
             cp scan-result.json "/srv/shared/${CORRELATION}/scan-result.json"
           fi
@@ -729,6 +188,13 @@ jobs:
       volumes:
         - /srv/shared:/srv/shared
     steps:
+      - name: Checkout
+        env:
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: *repo-checkout
       - name: Publish build result
         env:
           APP: ${{ github.event.repository.name }}
@@ -745,69 +211,6 @@ jobs:
           MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
           MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
           CORE_BUCKET: ${{ vars.CORE_BUCKET }}
-        run: |
-          set -eu
-          python - << 'PY'
-          import json
-          import os
-          import subprocess
-          from pathlib import Path
-          correlation = os.environ["CORRELATION"]
-          tag = os.environ["TAG"]
-          app = os.environ["APP"]
-          bucket = os.environ["CORE_BUCKET"]
-          if not correlation:
-              marker = Path("/srv/shared") / f"run-{os.environ.get('RUN_ID', '')}"
-              if marker.is_file():
-                  correlation = marker.read_text().strip()
-          if not correlation:
-              raise SystemExit("build did not register a correlation id")
-          share = Path("/srv/shared") / correlation
-          status = "Succeeded" if os.environ["BUILD_RESULT"] == "success" else "Failed"
-          subprocess.check_call([
-              "mc", "alias", "set", "minio", os.environ["MINIO_URL"],
-              os.environ["MINIO_ACCESS_KEY"], os.environ["MINIO_SECRET_KEY"],
-          ])
-
-          def upload(name, key):
-              source = share / name
-              if not source.is_file():
-                  return ""
-              destination = f"{bucket}/{key}"
-              subprocess.check_call(["mc", "cp", str(source), f"minio/{destination}"])
-              return destination
-
-          details = {
-              "buildLogs": upload("build-log.txt", f"taskrun-logs/{app}/{correlation}.txt"),
-              "mxLintResults": upload("report.json", f"linting-results/{app}/{tag}.json") if tag else "",
-              "mxUnitTestingResults": upload("results.json", f"unit-testing-results/{app}/{tag}.json") if tag else "",
-              "mxAppMdaMetadata": upload("metadata.json", f"mda-metadata/{app}/{tag}.json") if tag else "",
-              "mxAppVulnerabilities": upload("scan-result.json", f"oci-scan-results/{app}/{tag}.json") if tag else "",
-              "commitId": os.environ["COMMIT"],
-              "backupId": "",
-              "backupDbLocation": "",
-              "backupStorageLocation": "",
-              "backupComment": "",
-              "actionsetName": "",
-              "packageId": tag,
-          }
-          message = {
-              "appName": app,
-              "envName": "",
-              "correlationId": correlation,
-              "requester": os.environ["REQUESTER"],
-              "status": status,
-              "details": details,
-          }
-          subprocess.check_call([
-              "python", "/usr/local/bin/push-pipeline-events.py",
-              "--host", os.environ["RABBITMQ_HOST"],
-              "--port", "5672",
-              "--username", os.environ["RABBITMQ_USERNAME"],
-              "--password", os.environ["RABBITMQ_PASSWORD"],
-              "--exchange", "lowops-exchange",
-              "--vhost", "/lowops-vhost",
-              "--routing-key", "controller.app.build.complete",
-              "--message", json.dumps(message),
-          ])
-          PY
+          LOWOPS_UNIT_TEST_FILE: results.json
+          LOWOPS_INCLUDE_MDA: "true"
+        run: python .forgejo/scripts/publish_build.py
