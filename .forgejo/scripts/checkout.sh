@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Used after the workflow bootstrap clone (see build.yaml x-repo-checkout).
+# Used after the workflow bootstrap clone (see ci.yaml checkout step).
 set -eu
 
 root="$(cd "$(dirname "$0")" && pwd)"
