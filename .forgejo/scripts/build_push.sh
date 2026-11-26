@@ -6,7 +6,7 @@ mda=$(find . -name '*.mda' | head -n 1)
 test -n "$mda"
 
 mkdir -p project scripts
-unzip "$mda" -d ./project
+unzip -q "$mda" -d ./project
 cp -r /app/buildpack/scripts/* ./scripts/
 
 if [ -f Dockerfile ]; then
