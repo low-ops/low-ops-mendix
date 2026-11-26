@@ -32,6 +32,18 @@ fi
 
 printf 'image=%s\ncommit=%s\n' "$image" "$SHA" > "$share/build-log.txt"
 
+# Unqualified names (mendix-rootfs:builder) resolve to Docker Hub library/.
+ROOTFS_APP="${ROOTFS_APP:-${REGISTRY}/low-ops/rootfs-app:0-ci-main}"
+ROOTFS_BUILDER="${ROOTFS_BUILDER:-${REGISTRY}/low-ops/rootfs-builder:0-ci-main}"
+case "${ROOTFS_APP}" in
+  *.*/*) ;;
+  *) echo "ROOTFS_APP must be a fully qualified image, got: ${ROOTFS_APP}" >&2; exit 1 ;;
+esac
+case "${ROOTFS_BUILDER}" in
+  *.*/*) ;;
+  *) echo "ROOTFS_BUILDER must be a fully qualified image, got: ${ROOTFS_BUILDER}" >&2; exit 1 ;;
+esac
+
 /kaniko/executor \
   --context "$PWD" \
   --dockerfile "$dockerfile" \
